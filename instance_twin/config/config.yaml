@@ -46,5 +46,5 @@ Instance_Twin_Config:
     id: "{node_id}"
 
   heartbeat:
-    heartbeat_interval: 10
+    heartbeat_interval: 5
     ttl: 12
