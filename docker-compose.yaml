@@ -1,0 +1,22 @@
+services:
+  instance_twin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      ssh:
+        - custom=${USERPROFILE}/.ssh/git_clone_no_pass
+    container_name: instance_twin
+    restart: unless-stopped
+    environment:
+      MQTT_BROKER_HOST: mqtt-broker
+      REDIS_HOST: redis
+      TWIN_NAMESPACE: twin-project
+      TWIN_GUI_PORT: "8081"
+    ports:
+      - "8081:8081"
+    networks:
+      - twin_net
+
+networks:
+  twin_net:
+    external: true

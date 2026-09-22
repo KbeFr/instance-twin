@@ -1,0 +1,7 @@
+numpy>=1.26
+shapely>=2.0
+cvxpy>=1.4
+osqp>=0.6.5
+paho-mqtt>=2.0
+matplotlib>=3.8
+rosbags

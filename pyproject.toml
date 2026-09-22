@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "instance_twin"
+version = "0.1.0"
+dependencies = [
+
+    'numpy>=1.26',
+    'shapely>=2.0',
+    'cvxpy>=1.4',
+    'osqp>=0.6.5',
+    'paho-mqtt>=2.0',
+    'matplotlib>=3.8',
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["instance_twin*"]
+
+[project.scripts]
+instance-twin = "instance_twin.main:main"

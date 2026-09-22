@@ -1,0 +1,32 @@
+
+# This is the default robot config for if to little info is given in discovery
+
+name : 'UGV1'
+id : 21
+kind : ugv
+mass : 1.0                #kg
+avg_speed : 1             #m/s
+max_speed : 1.5           #m/s
+friction : 0.25
+battery:
+  name: 'two_friction'
+  init : 100.0            #%
+  anc_drain : 5.0
+  scale : 1
+  capacity : 71928.0      #J
+kinematics: {name: 'diff'}
+shape: {name: 'circle',
+        radius: 0.2}
+radius: 0.2
+controller: {name: 'c3bf' ,
+             robot_type: 'diff',
+             safety_margin: 0.05,
+             goal_gain: 0.8
+}
+perception_sensors: {}
+
+
+topics: {action: out, imu : in , wheel_odom: in , pose : in, detections: in } #for instance
+
+
+

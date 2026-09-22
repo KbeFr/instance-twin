@@ -1,0 +1,50 @@
+Instance_Twin_Config:
+  Logger_Config:
+    log_level: DEBUG
+    include_packages: [core_msgs]
+    logger_type: terminal
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    terminal: {}
+    file:
+      filename: irsim_twin.log
+    mqtt:
+      broker: "{mqtt_address}"
+      port: 1883
+      topic: logs
+    redis:
+      host: "{redis_address}"
+      port: 6379
+      channel: logs
+      db: 6
+
+  Knowledge_Config:
+    knowledge_type: redis
+    host: "{redis_address}"
+    port: 6379
+    db: 0
+
+  flexCloud_Manager_Config:
+    knowledge_type: redis
+    host: "{redis_address}"
+    port: 6379
+    db: 6
+
+
+  Communication_managers:
+    - Data_Manager_Config:
+        protocol: mqtt
+        broker: "{mqtt_address}"
+        port: 1883
+    - Data_Manager_Config:
+        protocol: redis
+        host: "{redis_address}"
+        port: 6379
+
+  application_Descriptor:
+    connectorID_type: static
+    connectorID: "twin-project"
+    id: "{node_id}"
+
+  heartbeat:
+    heartbeat_interval: 10
+    ttl: 12
