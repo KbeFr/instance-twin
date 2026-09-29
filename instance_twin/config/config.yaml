@@ -42,7 +42,7 @@ Instance_Twin_Config:
 
   application_Descriptor:
     connectorID_type: static
-    connectorID: "twin-project"
+    connectorID: "{namespace}"
     id: "{node_id}"
 
   heartbeat:

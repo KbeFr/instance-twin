@@ -21,10 +21,8 @@ from core_msgs.instance_aggregate.handshake import (
 )
 from core_msgs.instance_aggregate.mission import Mission, MissionType, MissionStatus
 from core_msgs.instance_aggregate.mission_handshake import MissionBidding, MissionPlanHint, MissionResponder
-from core_msgs.instance_agent.sensor_payloads import PoseMessage, DetectionMessage
-from core_msgs.instance_agent.controll_payloads import (
-    VelocityCommandMessage, InitialCommandMessage,
-)
+from core_msgs.instance_agent.sensor_payloads import BatteryMessage, PoseMessage, DetectionMessage
+from core_msgs.instance_agent.controll_payloads import InitialCommandMessage
 from instance_twin.instance_comms import INSTANCE_DISCOVERY
 
 
@@ -138,7 +136,7 @@ class InstanceTwin(MessageDispatcher):
         # hold offers on several missions at once.
         self.mission_responder = HandshakeResponder(self.name, bid_fn=self._estimate_mission_bid)
 
-        self.transport.subscribe_agent(self.agent.name, self.agent.topic_dict)
+        self.transport.subscribe_agent(self.agent.name, self.agent.interface)
 
         # Notify the agent immediately
         self._send_link()
@@ -162,6 +160,12 @@ class InstanceTwin(MessageDispatcher):
 
     def _unbind(self) -> None:
         self.transport.stop_stepping()
+
+        # A real robot keeps its last command until its own watchdog trips, so stop it explicitly
+        if self.agent is not None and self.drive_agent:
+            self.agent.velocity = np.zeros_like(self.agent.velocity)
+            self._send_action()
+
         self.transport.unsubscribe_agent()
 
         released = self.agent.name if self.agent else "unknown"
@@ -255,6 +259,14 @@ class InstanceTwin(MessageDispatcher):
             self.logger.info("mission %s CLEARED", result.subject)
 
 
+    @handles(MessageType.BATTERY)
+    def _handle_battery(self, msg: BatteryMessage) -> None:
+        """Measured charge overrides the modelled one, the model only fills the gaps in between."""
+        if self.agent is None or self.agent.battery is None or not isinstance(msg, BatteryMessage):
+            return
+        if msg.percentage is not None:
+            self.agent.battery.status = float(msg.percentage)
+
     @handles(MessageType.DETECTIONS)
     def _handle_detection(self, msg: DetectionMessage) -> None:
         """Single inbound channel for every sensor's detections.
@@ -313,7 +325,7 @@ class InstanceTwin(MessageDispatcher):
         self._publish_obstacles()
 
         if self.drive_agent:
-            self.transport.publish_to_agent(MessageType.ACTION, self._velocity_msg())
+            self._send_action()
 
         return self.agent.state
 
@@ -345,13 +357,17 @@ class InstanceTwin(MessageDispatcher):
     # --- Agent link ----
 
     def _send_link(self) -> None:
-        """Tell the agent who owns it."""
+        """Tell the agent who owns it; bridge robots stream anyway, so their first pose is the ack."""
         if not self.agent:
             return
         msg = InitialCommandMessage(instance_name=self.name, agent_name=self.agent.name)
         self.transport.publish_to_agent(MessageType.ACTION, msg)
         self._link_countdown = int(self.loop_freq * 2)  # retry every ~2s
         self.logger.debug("link sent to: %s", self.agent.name)
+
+    def _send_action(self) -> None:
+        """Current action as a canonical MotionCommand, the interface turns it into the agent's format."""
+        self.transport.publish_to_agent(MessageType.ACTION, self.agent.motion_command())
 
     # -- mission state ---
 
@@ -399,11 +415,6 @@ class InstanceTwin(MessageDispatcher):
 
 
     # --- Outbound payloads ----
-
-    def _velocity_msg(self) -> VelocityCommandMessage:
-        msg = VelocityCommandMessage("kine", [0.0 for _ in range(3)])
-        msg.cmd = self.agent.velocity.reshape(-1).tolist()
-        return msg
 
     def _publish_state(self) -> None:
         if not self.agent:

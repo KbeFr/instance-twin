@@ -11,9 +11,11 @@ from instance_twin.battery.battery_handler import BatteryFactory
 from instance_twin.irsim_borrowed.controller.controller_handler import ControllerFactory
 from instance_twin.irsim_borrowed.geometry.geometryhandler import GeometryFactory
 from instance_twin.irsim_borrowed.kinematics.kinematics_handler import KinematicsFactory
+from instance_twin.interfaces.interface_handler import AgentInterface, AgentInterfaceFactory
 from instance_twin.sensors.base_sensors import PerceptionSensor
 from instance_twin.sensors.perception_sensors import PerceptionSensorFactory
 from core_msgs.global_msgs.global_payloads import AgentDiscoveryMessage
+from core_msgs.instance_agent.controll_payloads import MotionCommand
 from core_msgs.instance_aggregate.mission_handshake import MissionBidding
 from core_msgs.utils.utils import load_config
 
@@ -49,6 +51,7 @@ class AgentProfile:
         self.name = agent_name
         self.id = _get("agent_id")
         self.kind = _get("kind")
+        self.agent_type = _get("agent_type")
 
         # specs
         self.radius = _get("radius")
@@ -59,6 +62,13 @@ class AgentProfile:
 
         self.shape_config = _get("shape")
         self.topic_dict = _get("topics")
+
+        # Wire format, picked by agent type: simulated core_msgs, a ROS2 bridge robot, ...
+        try:
+            self.interface: AgentInterface = AgentInterfaceFactory.create_interface(
+                self.agent_type, agent_name, topics=self.topic_dict, **(_get("interface") or {}))
+        except ValueError as ex:
+            raise DigitalTwinConfigError(f"Cannot interface agent '{agent_name}': {ex}") from ex
 
         # Sub-systems
         self.geometry = GeometryFactory.create_geometry(**self.shape_config)
@@ -76,9 +86,9 @@ class AgentProfile:
             sensor = PerceptionSensorFactory.create_handler(**sensor_config)
             self.perception_sensors[sensor.name] = sensor
 
-        # Runtime State
-        self.state = np.zeros((3, 1))
-        self.velocity = np.zeros((2, 1))
+        # Runtime State, sized by the kinematics: diff [x,y,th]/[v,w], acker adds steer, a uav more
+        self.state = np.zeros((self.kinematics.state_dim, 1))
+        self.velocity = np.zeros((self.kinematics.action_dim, 1))
         self.goal: np.ndarray | None = None
         self.linked: bool = False
         self.battery_depleted: bool = False
@@ -138,6 +148,16 @@ class AgentProfile:
     @property
     def velocity_xy(self) -> np.ndarray:
         return self.kinematics.velocity_to_xy(self.state, self.velocity) if self.kinematics else np.zeros((2, 1))
+
+    def motion_command(self) -> MotionCommand:
+        """Current action in every form an interface may need: raw action plus body twist."""
+        linear, angular = self.kinematics.body_twist(self.state, self.velocity)
+        return MotionCommand(
+            kinematics=self.kinematics.name,
+            action=self.velocity.reshape(-1).tolist(),
+            linear=linear,
+            angular=angular,
+        )
 
     @property
     def vel_min(self) -> np.ndarray:

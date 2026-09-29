@@ -32,7 +32,7 @@ from instance_twin.instance_base import InstanceTwin
 TICK_HZ = float(os.environ.get("TWIN_TICK_HZ", "10"))
 MQTT_BROKER_HOST = os.environ.get("MQTT_BROKER_HOST", "localhost")
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-NAMESPACE = os.environ.get("TWIN_NAMESPACE", "default_ns")
+NAMESPACE = os.environ.get("TWIN_NAMESPACE", "default-ns")
 TWIN_NAME = os.environ.get("TWIN_NAME", os.environ.get("HOSTNAME", "InstanceTwin"))
 DRIVE_AGENT = os.environ.get("TWIN_DRIVE_AGENT", "0").strip().lower() in ("1", "true", "yes")
 GUI_ENABLED = os.environ.get("TWIN_GUI", "1").strip().lower() in ("1", "true", "yes")

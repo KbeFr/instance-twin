@@ -3,6 +3,8 @@ instance_comms.py
 """
 from __future__ import annotations
 
+from functools import partial
+
 import jsonpickle
 
 from flexCommunicator.clientLibraries.flcpy.flexNode import flexNode
@@ -12,6 +14,8 @@ from core_msgs.global_msgs.global_payloads import (
     HeartBeatMessage, InstanceDiscoveryMessage, RegisteredMessage,
 )
 from core_msgs.topic_contract import MessageType, register_node_topics, get_data_name
+
+from instance_twin.interfaces.interface_handler import AgentInterface
 
 
 INSTANCE_DISCOVERY = True
@@ -56,7 +60,8 @@ class InstanceNetworkNode(flexNode):
         self._aggregate_topic_dict = aggregate_topic_dict
 
         self._agg_topics: dict = {}
-        self._link_topics: dict = {}
+        self._link_topics: dict = {}                            # agent msg types we publish on
+        self._interface: AgentInterface | None = None
         self._agent_name: str | None = None
         self._warned: set[str] = set()
 
@@ -139,10 +144,20 @@ class InstanceNetworkNode(flexNode):
         self._publish(get_data_name(self.node_name, msg_type), payload)
 
     def publish_to_agent(self, msg_type: MessageType, payload) -> None:
-        """ scoped to the agent """
-        if self._agent_name is None:
+        """Canonical message -> the agent's wire format through its interface, then publish."""
+        interface = self._interface
+        if interface is None or payload is None or msg_type not in self._link_topics:
             return
-        self._publish(get_data_name(self._agent_name, msg_type), payload)
+        try:
+            wire = interface.encode(msg_type, payload)
+        except Exception as ex:
+            key = f"encode:{msg_type.value}"
+            if key not in self._warned:
+                self._warned.add(key)
+                self.logger.warning("encode failed on %s: %s (suppressing repeats)", msg_type.value, ex)
+            return
+        if wire is not None:
+            self._publish(get_data_name(self._agent_name, msg_type), wire)
 
     def _publish(self, data_name: str, payload) -> None:
         try:
@@ -155,9 +170,10 @@ class InstanceNetworkNode(flexNode):
 
     # --- subscription lifecycle ---------------------------------------------
 
-    def subscribe_agent(self, agent_name: str, agent_topic_dict: dict) -> None:
+    def subscribe_agent(self, agent_name: str, interface: AgentInterface) -> None:
         """Wire up both channels: aggregate <-> instance and instance <-> agent."""
         self._agent_name = agent_name
+        self._interface = interface
 
         self._agg_topics = register_node_topics(
             node=self, topic_dict=self._aggregate_topic_dict,
@@ -167,23 +183,42 @@ class InstanceNetworkNode(flexNode):
             },
         )
 
+        # Only wire what the twin handles, the rest would just be decoded and dropped
         self._link_topics = register_node_topics(
-            node=self, topic_dict=agent_topic_dict,
+            node=self, topic_dict=interface.topic_dict(),
             namespace=self.namespace, node_id=agent_name,
-            in_callbacks={
-                MessageType.POSE: lambda p: self._ingest(MessageType.POSE, p),
-                MessageType.DETECTIONS: lambda p: self._ingest(MessageType.DETECTIONS, p),
-            },
+            in_callbacks={msg_type: partial(self._ingest_agent, msg_type) for msg_type in self.twin._DISPATCH},
         )
-        self.logger.debug("Subscribed to agent=%s topics", agent_name)
+        self.logger.debug("Subscribed to agent=%s via %s", agent_name, type(interface).__name__)
+
+    def _ingest_agent(self, msg_type: MessageType, payload) -> None:
+        """Agent wire format -> core_msgs through its interface, then queue."""
+        print(msg_type)
+        print(payload)
+
+        interface = self._interface
+        if interface is None:
+            return
+        try:
+            msg = interface.decode(msg_type, payload)
+        except Exception as ex:
+            self.decode_errors += 1
+            key = f"decode:{msg_type.value}"
+            if key not in self._warned:
+                self._warned.add(key)
+                self.logger.warning("decode failed on %s: %s (suppressing repeats)", msg_type.value, ex)
+            return
+        if msg is not None:
+            self.twin.inbox.put((msg_type, msg))
 
     def unsubscribe_agent(self) -> None:
         """
         *Still needs the logic in the flex node to actually be able to unsubscribe.
-        Until then the twin's handlers drop anything that arrives while unbound.
+        Until then the interface is dropped, so late agent traffic is ignored here.
         """
         self._agg_topics = {}
         self._link_topics = {}
+        self._interface = None
         self._agent_name = None
 
     # --- stepping -----------------------------------------------------------

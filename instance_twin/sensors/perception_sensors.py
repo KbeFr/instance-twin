@@ -111,6 +111,43 @@ class Sim2DDetectionHandler(PerceptionSensor):
         return out
 
 
+@register_perception_sensor("lidar")
+class LidarClusterSensor(PerceptionSensor):
+    """Scan clusters -> world obstacles, keyed by grid cell since clusters carry no identity."""
+
+    def __init__(self, name: str, offset: Dict[str, Any] | None = None,
+                 radius: float = 0.1, cell: float = 0.3, **params: Any):
+        self.radius = float(radius)
+        self.cell = float(cell)
+        super().__init__(name, offset)
+
+    def get_obstacle_observations(self, payload: list[DetectedObjectSim2D], robot_pose) -> list[ObstacleObservation]:
+        if not isinstance(payload, (list, tuple)):
+            logger.warning("[%s] expected a list of DetectedObjectSim2D, got %s",
+                           self.name, type(payload).__name__)
+            return []
+
+        sensor = self.sensor_frame(*robot_pose)
+        out: list[ObstacleObservation] = []
+
+        for det in payload:
+            if det.distance is None or det.bearing is None:
+                continue
+            wx, wy, _ = sensor.apply(det.distance * math.cos(det.bearing),
+                                     det.distance * math.sin(det.bearing))
+            out.append(ObstacleObservation(
+                # Same cell -> same id, so a static wall refreshes instead of piling up.
+                id=f"{self.name}:{round(wx / self.cell)}:{round(wy / self.cell)}",
+                x=wx,
+                y=wy,
+                theta=0.0,
+                radius=det.radius if det.radius is not None else self.radius,
+                confidence=det.confidence if det.confidence is not None else 1.0,
+            ))
+
+        return out
+
+
 class PerceptionSensorFactory:
     """
     Factory class to create DetectionHandlers.

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from math import atan2, cos, sin
+from math import atan2, cos, sin, tan
 from typing import ClassVar
 
 import numpy as np
@@ -157,6 +157,10 @@ class KinematicsHandler(ABC):
         """
         return float(state[2, 0]) if state.shape[0] > 2 else 0.0
 
+    def body_twist(self, state: np.ndarray, velocity: np.ndarray) -> tuple[list[float], list[float]]:
+        """Action -> body-frame (linear [vx, vy, vz], angular [wx, wy, wz]); default is [v, w]."""
+        return [float(velocity[0, 0]), 0.0, 0.0], [0.0, 0.0, float(velocity[1, 0])]
+
 
 # ---------------------------------------------------------------------------
 # Concrete subclasses
@@ -205,6 +209,12 @@ class OmniKinematics(KinematicsHandler):
 
     def compute_heading(self, state: np.ndarray, velocity: np.ndarray) -> float:
         return float(atan2(velocity[1, 0], velocity[0, 0]))
+
+    def body_twist(self, state: np.ndarray, velocity: np.ndarray) -> tuple[list[float], list[float]]:
+        """World [vx, vy] rotated into the body frame."""
+        theta = float(state[2, 0]) if state.shape[0] > 2 else 0.0
+        vx, vy = float(velocity[0, 0]), float(velocity[1, 0])
+        return [cos(theta) * vx + sin(theta) * vy, -sin(theta) * vx + cos(theta) * vy, 0.0], [0.0, 0.0, 0.0]
 
 
 @register_kinematics("diff")
@@ -289,6 +299,12 @@ class AckermannKinematics(KinematicsHandler):
             self.wheelbase,
         )
 
+    def body_twist(self, state: np.ndarray, velocity: np.ndarray) -> tuple[list[float], list[float]]:
+        """Steer mode turns the steering angle into a yaw rate."""
+        v = float(velocity[0, 0])
+        w = v * tan(float(velocity[1, 0])) / self.wheelbase if self.mode == "steer" else float(velocity[1, 0])
+        return [v, 0.0, 0.0], [0.0, 0.0, w]
+
 class KinematicsFactory:
     """
     Factory class to create kinematics handlers.
@@ -302,6 +318,8 @@ class KinematicsFactory:
         mode: str = "steer",
         wheelbase: float | None = None,
         role: str = "robot",
+        vel_max: list[float] | None = None,
+        vel_min: list[float] | None = None,
     ) -> KinematicsHandler:
         name = name.lower() if name else None
 
@@ -310,8 +328,15 @@ class KinematicsFactory:
         if handler_cls is not None:
             # AckermannKinematics accepts extra kwargs
             if issubclass(handler_cls, AckermannKinematics):
-                return handler_cls(name, noise, alpha, mode, wheelbase or 1.0)
-            return handler_cls(name, noise, alpha)
+                handler = handler_cls(name, noise, alpha, mode, wheelbase or 1.0)
+            else:
+                handler = handler_cls(name, noise, alpha)
+            # Real robot limits shadow the class defaults
+            if vel_max is not None:
+                handler.vel_max = list(vel_max)
+            if vel_min is not None:
+                handler.vel_min = list(vel_min)
+            return handler
 
         # elif name == 'rigid3d':
         #     return Rigid3DKinematics(name, noise, alpha)

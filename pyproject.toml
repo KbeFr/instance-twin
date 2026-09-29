@@ -13,6 +13,7 @@ dependencies = [
     'osqp>=0.6.5',
     'paho-mqtt>=2.0',
     'matplotlib>=3.8',
+    'rosbags'
 ]
 
 [tool.setuptools.packages.find]
