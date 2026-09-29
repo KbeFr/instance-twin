@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -e /app/flexCommunicator
 COPY instance-twin /app/instance-twin
 RUN pip install --no-cache-dir -e /app/instance-twin
 
-WORKDIR /app/instance_twin
+WORKDIR /app/instance-twin
 
 ENV PYTHONUNBUFFERED=1 \
     TWIN_TICK_HZ=10 \
