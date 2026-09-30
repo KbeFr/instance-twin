@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+from typing import Any
+
+from core_msgs.topic_contract import MessageType
 
 GRAVITY = 9.81
 
@@ -35,9 +38,14 @@ def register_battery(name: str):
 
 
 class BatteryModel(ABC):
+    """Drain model for bidding and in between readings; listens on its topic like a sensor."""
+
+    default_topic = MessageType.BATTERY
+
     def __init__(self, name : str,  init: float, capacity: float, anc_drain: float,
-                 scale: float = 1.0, **kwargs) -> None:
+                 scale: float = 1.0, topic: str | None = None, **kwargs) -> None:
         self.name = name
+        self.topic = MessageType(topic) if topic else self.default_topic
         self.status = float(init)
         self.capacity_joules = float(capacity)
         self.joules_per_percent = max(float(capacity) / 100.0, 1e-9)
@@ -76,6 +84,12 @@ class BatteryModel(ABC):
         drain = self.to_percent(joules)
         self.status = max(0.0, self.status - drain)
         return drain
+
+    def measure(self, msg: Any) -> None:
+        """A measured charge replaces the modelled one; the model only fills the gaps in between."""
+        percentage = getattr(msg, "percentage", None)
+        if percentage is not None:
+            self.status = float(percentage)
 
 
 
@@ -124,6 +138,6 @@ class BatteryFactory:
         return _battery_registry.get(name.lower() if name else "")
 
     @staticmethod
-    def available_shapes() -> dict[str, type[BatteryModel]]:
+    def available_batteries() -> dict[str, type[BatteryModel]]:
         """Read-only view of the registry: ``{name: handler_class}``."""
         return dict(_battery_registry)

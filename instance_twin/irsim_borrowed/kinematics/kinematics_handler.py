@@ -71,6 +71,7 @@ class KinematicsHandler(ABC):
     obstacle_color: str = "k"
     description: str | None = None
     show_arrow: bool = True
+    angle_indices: ClassVar[tuple[int, ...]] = (2,)   # state rows wrapped to [-pi, pi]
 
     def __init__(self, name, noise: bool = False, alpha: list | None = None):
         """

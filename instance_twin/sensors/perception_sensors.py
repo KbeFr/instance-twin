@@ -4,6 +4,7 @@ import logging
 import math
 from typing import Any, Dict
 
+from core_msgs.topic_contract import MessageType
 from instance_twin.sensors.base_sensors import PerceptionSensor
 from core_msgs.utils.frames import Frame
 from core_msgs.instance_agent.sensor_payloads import ArucoDetection, DetectedObjectSim2D
@@ -37,10 +38,16 @@ def register_perception_sensor(name: str):
 class ArucoDetectionSensor(PerceptionSensor):
     """Marker poses relative to a camera -> world obstacles."""
 
-    def __init__(self, name: str, offset: Dict[str, Any] | None = None,
-                 radius: float = 0.8, **params: Any):
+    default_topic = MessageType.ARUCO_DETECTIONS
+
+    def __init__(self,
+                 name: str,
+                 offset: Dict[str, Any] | None = None,
+                 radius: float = 0.8,
+                 topic: str | None = None,
+                 **params: Any):
         self.radius = float(radius)
-        super().__init__(name, offset)
+        super().__init__(name, topic ,offset)
 
     def get_obstacle_observations(self, payload: ArucoDetection, robot_pose) -> list[ObstacleObservation]:
         if not isinstance(payload, ArucoDetection):
@@ -71,10 +78,16 @@ class ArucoDetectionSensor(PerceptionSensor):
 class Sim2DDetectionHandler(PerceptionSensor):
     """Relative object positions -> world obstacles."""
 
-    def __init__(self, name: str, offset: Dict[str, Any] | None = None,
-                 radius: float = 0.8, **params: Any):
+    default_topic = MessageType.SIM2D_DETECTIONS
+
+    def __init__(self,
+                 name: str,
+                 offset: Dict[str, Any] | None = None,
+                 radius: float = 0.8,
+                 topic: str | None = None,
+                 **params: Any):
         self.radius = float(radius)
-        super().__init__(name, offset)
+        super().__init__(name, topic, offset)
 
     def get_obstacle_observations(self, payload: list[DetectedObjectSim2D], robot_pose) -> list[ObstacleObservation]:
         if isinstance(payload, DetectedObjectSim2D):
@@ -115,11 +128,18 @@ class Sim2DDetectionHandler(PerceptionSensor):
 class LidarClusterSensor(PerceptionSensor):
     """Scan clusters -> world obstacles, keyed by grid cell since clusters carry no identity."""
 
-    def __init__(self, name: str, offset: Dict[str, Any] | None = None,
-                 radius: float = 0.1, cell: float = 0.3, **params: Any):
+    default_topic = MessageType.LIDAR
+
+
+    def __init__(self,
+                 name: str, offset: Dict[str, Any] | None = None,
+                 radius: float = 0.1,
+                 cell: float = 0.3,
+                 topic: str | None = None,
+                 **params: Any):
         self.radius = float(radius)
         self.cell = float(cell)
-        super().__init__(name, offset)
+        super().__init__(name, topic, offset)
 
     def get_obstacle_observations(self, payload: list[DetectedObjectSim2D], robot_pose) -> list[ObstacleObservation]:
         if not isinstance(payload, (list, tuple)):

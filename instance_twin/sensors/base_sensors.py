@@ -1,10 +1,12 @@
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
+from core_msgs.topic_contract import MessageType
 from core_msgs.utils.frames import Frame
 from core_msgs.utils.math import Vector3, Quaternion
+from instance_twin.estimation.estimator_handler import Measurement
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +24,17 @@ class Offset:
 
 # --- Shared Base ---
 class BaseSensor(ABC):
-    def __init__(self, name: str, offset: Dict[str, Any] | None):
+
+    default_topic: ClassVar[MessageType]
+
+    def __init__(self, name: str,
+                 topic: str | None = None,
+                 offset: Dict[str, Any] | None = None
+    ):
         self.name = name
         self.offset = self._parse_offset(offset or {})
+        self.topic = MessageType(topic) if topic else self.default_topic
+
 
     def _parse_offset(self, offset: Dict[str, Any]) -> Offset:
         """Position + orientation"""
@@ -41,9 +51,6 @@ class BaseSensor(ABC):
             orientation=Quaternion(**ori) if ori else Quaternion(),
         )
 
-
-# --- Functional Branches ---
-class PerceptionSensor(BaseSensor):
     def _build_mount(self) -> Frame:
         """Offset -> mount frame, relative to the robot body"""
         return Frame(self.offset.position, self.offset.orientation)
@@ -52,12 +59,45 @@ class PerceptionSensor(BaseSensor):
         """The sensor's own frame in the world, based on agent position and orientation (2d)"""
         return Frame.from_2d(x, y, theta).compose(self._build_mount())
 
+
+# --- Functional Branches ---
+class PerceptionSensor(BaseSensor):
+
     @abstractmethod
     def get_obstacle_observations(self, payload, robot_pose) -> list:
         pass
 
 
 class StateSensor(BaseSensor):
+    """Payload -> Measurement. The components given a noise std are the ones fused."""
+
+    components: ClassVar[frozenset[str]] = frozenset()
+
+    def __init__(self, name: str,
+                 noise: Dict[str, float],
+                 topic: str | None = None,
+                 offset: Dict[str, Any] | None = None
+    ):
+        # State sensors sit at the body origin unless told otherwise
+        super().__init__(name, topic, offset or {"position": {}, "orientation": {}})
+
+        self.noise = {k: float(v) for k, v in (noise or {}).items()}
+
+        unknown = set(self.noise) - self.components
+        if unknown or not self.noise:
+            raise ValueError(f"[{name}] noise must name components from {sorted(self.components)}, "
+                             f"got {sorted(self.noise)}")
+
     @abstractmethod
-    def get_state_update(self, payload) -> dict:
-        pass
+    def read(self, payload) -> Dict[str, float | None] | None:
+        """Payload -> raw component values, None to drop."""
+
+    def get_state_update(self, payload) -> Measurement | None:
+        """Only configured components with a value make it into the measurement."""
+        values = self.read(payload)
+        if not values:
+            return None
+        picked = {k: float(values[k]) for k in self.noise if values.get(k) is not None}
+        if not picked:
+            return None
+        return Measurement(values=picked, noise={k: self.noise[k] for k in picked}, source=self.name)

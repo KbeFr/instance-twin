@@ -1,258 +1,120 @@
-"""base/irsim_borrowed/capabilities.py
+"""
+instance_twin/capabilities.py
 
-Single source of truth for "what can this build of the twin actually be
-configured with" -- kinematics, shape/geometry, and controller names, plus
-whatever AgentKind values core_msgs.agents_contract happens to define.
-
-Every name and parameter schema below is read directly off the live
-registries in kinematics_handler.py / geometry_handler.py /
-controller_handler.py (via their `available_*()` accessors) and, for
-per-type parameters, off the actual callable each factory hands kwargs to
--- via `inspect.signature`, not a hand-copied list. Add a new
-`@register_kinematics(...)`/`@register_geometry(...)`/`@register_controller(...)`
-class anywhere in this package and it shows up here automatically, with
-its real parameters, with no second place to remember to update.
-
-This module only knows about the *twin's* own vendored implementations.
-It says nothing about what the separate *simulation* container's real
-`irsim` package can do -- that lives in that container's
-irsim_capabilities.py. The two can genuinely differ (see that module's
-docstring), and collapsing them into one list would misrepresent both.
+Overview of everything an agent spec can configure, read straight off the registries:
+per entry its description, fixed specs, and parameters (* = required).
+    python -m instance_twin.capabilities
 """
 from __future__ import annotations
 
 import inspect
 from typing import Any
 
+from core_msgs.agents_contract import AgentKind
+from instance_twin.battery.battery_handler import BatteryFactory
+from instance_twin.estimation.estimator_handler import EstimatorFactory
+from instance_twin.interfaces.interface_handler import AgentInterfaceFactory
+from instance_twin.interfaces.ros_interfaces import RosBridgeInterface
+from instance_twin.interfaces.ros.ros_topic_mapping import ROS_TOPIC_MAPPING
 from instance_twin.irsim_borrowed.controller.controller_handler import ControllerFactory
 from instance_twin.irsim_borrowed.geometry.geometryhandler import GeometryFactory
-from instance_twin.irsim_borrowed.kinematics.kinematics_handler import (
-    AckermannKinematics,
-    KinematicsFactory,
-)
-from irsim_specific.sensors.sensor_factory import SensorFactory
+from instance_twin.irsim_borrowed.kinematics.kinematics_handler import AckermannKinematics, KinematicsFactory
+from instance_twin.sensors.perception_sensors import PerceptionSensorFactory
+from instance_twin.sensors.state_sensors import StateSensorFactory
+
+# Filled in by the twin itself, never by config
+_SKIP = {"self", "name", "kinematics", "role", "agent_name", "topic_channels"}
+# Class-level facts worth showing next to the parameters
+_SPECS = ("state_dim", "action_dim", "vel_min", "vel_max", "default_topic", "components")
 
 
-class UnsupportedAgentConfig(ValueError):
-    """Raised when a resolved agent config (from a DiscoveryMessage, a
-    fallback default_agent_config.yaml entry, or a mix of both) names a
-    kinematics/shape/controller/kind this build doesn't have registered,
-    is missing a parameter that type requires, or sets a parameter that
-    type doesn't recognize.
-
-    Carries every problem found at once (`.problems`), not just the
-    first, so a rejection or log line can say everything that's wrong in
-    one shot instead of a frustrating fix-one-see-the-next loop.
-    """
-
-    def __init__(self, problems: list[str]):
-        self.problems = list(problems)
-        super().__init__("; ".join(self.problems))
+def params(fn) -> dict[str, str]:
+    """Config parameters of a callable; required ones end in *."""
+    return {p.name: f"{p.name}*" if p.default is p.empty else f"{p.name}={p.default!r}"
+            for p in inspect.signature(fn).parameters.values()
+            if p.name not in _SKIP and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)}
 
 
-# ---------------------------------------------------------------------------
-# Introspection
-# ---------------------------------------------------------------------------
-
-_EMPTY = inspect.Parameter.empty
-
-
-def _inspect(fn: Any) -> tuple[dict[str, Any], bool]:
-    """``({param_name: default}, accepts_extra_kwargs)`` for `fn`.
-
-    Skips ``self``/``name``/``*args``. A default of `_EMPTY` means the
-    parameter is required. ``accepts_extra_kwargs`` is True if `fn` takes
-    a ``**kwargs`` catch-all (e.g. PolygonGeometry's random-shape
-    generator options) -- callers use that to know an unrecognized key
-    isn't necessarily a mistake.
-    """
-    params: dict[str, Any] = {}
-    accepts_extra = False
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return params, accepts_extra
-    for pname, p in sig.parameters.items():
-        if p.kind is inspect.Parameter.VAR_KEYWORD:
-            accepts_extra = True
+def init_params(cls: type) -> dict[str, str]:
+    """__init__ parameters up the class chain, as far as each level passes **kwargs on."""
+    out: dict[str, str] = {}
+    for klass in cls.__mro__[:-1]:
+        init = vars(klass).get("__init__")
+        if init is None:
             continue
-        if pname in ("self", "name") or p.kind is inspect.Parameter.VAR_POSITIONAL:
-            continue
-        params[pname] = p.default
-    return params, accepts_extra
-
-
-def _entry(raw: dict[str, Any], accepts_extra: bool) -> dict[str, Any]:
-    return {
-        "params": {k: (None if v is _EMPTY else v) for k, v in raw.items()},
-        "required": [k for k, v in raw.items() if v is _EMPTY],
-        "accepts_extra": accepts_extra,
-    }
-
-
-def _describe(registry: dict[str, type], ctor) -> dict[str, dict[str, Any]]:
-    """``{name: entry}`` for every class in `registry`, reading parameters
-    off ``ctor(cls)`` -- the callable that actually receives that class's
-    config kwargs (see the call sites below; this differs by registry
-    because the three factories don't all wire config the same way)."""
-    out: dict[str, dict[str, Any]] = {}
-    for reg_name, cls in registry.items():
-        raw, accepts_extra = _inspect(ctor(cls))
-        out[reg_name] = _entry(raw, accepts_extra)
+        for key, text in params(init).items():
+            out.setdefault(key, text)
+        if not any(p.kind is p.VAR_KEYWORD for p in inspect.signature(init).parameters.values()):
+            break
     return out
 
 
-def describe_kinematics() -> dict[str, dict[str, Any]]:
-    """Unlike shapes/controllers, every kinematics name is built through
-    one shared entry point -- ``KinematicsFactory.create_kinematics`` --
-    which owns a fixed parameter list and manually forwards the relevant
-    ones into each handler class (see its source: non-Ackermann types
-    only ever get ``name, noise, alpha``; Ackermann additionally gets
-    ``mode, wheelbase``). So the true config surface is that one
-    signature, not each handler class's own ``__init__`` -- which the
-    factory always satisfies itself and which config-driven code
-    (AgentProfile.build) never calls directly.
-    """
-    raw, accepts_extra = _inspect(KinematicsFactory.create_kinematics)
-    raw.pop("role", None)  # caller context (used for a log message), not user config
-
-    out: dict[str, dict[str, Any]] = {}
-    for kind_name, cls in KinematicsFactory.available_kinematics().items():
-        applicable = dict(raw)
-        if not issubclass(cls, AckermannKinematics):
-            applicable.pop("mode", None)
-            applicable.pop("wheelbase", None)
-        out[kind_name] = _entry(applicable, accepts_extra)
+def kinematics_params(cls: type) -> dict[str, str]:
+    """create_kinematics owns the parameter list; mode and wheelbase only reach Ackermann."""
+    out = params(KinematicsFactory.create_kinematics)
+    if not issubclass(cls, AckermannKinematics):
+        out.pop("mode", None)
+        out.pop("wheelbase", None)
     return out
 
 
-def describe_shapes() -> dict[str, dict[str, Any]]:
-    # geometry_handler.__init__ is the generic (self, name, **kwargs) --
-    # kwargs flow straight through to construct_original_geometry, which
-    # is where each shape's real parameters are declared.
-    return _describe(
-        GeometryFactory.available_shapes(), lambda cls: cls.construct_original_geometry
-    )
+def specs(cls: type) -> dict[str, Any]:
+    """Dimensions, velocity limits, the topic a sensor listens on and what it measures."""
+    out: dict[str, Any] = {}
+    for key in _SPECS:
+        value = getattr(cls, key, None)
+        if value is not None:
+            out[key.replace("default_", "")] = sorted(value) if isinstance(value, frozenset) else getattr(value, "value", value)
+    return out
 
 
-def describe_controllers() -> dict[str, dict[str, Any]]:
-    # ControllerFactory.create_controller splats config straight into
-    # cls(**kwargs), so each controller's own __init__ is the real schema.
-    return _describe(ControllerFactory.available_controllers(), lambda cls: cls.__init__)
-
-def describe_sensors() -> dict[str, dict[str, Any]]:
-    return _describe(SensorFactory.available_perception_sensors(), lambda cls: cls.__init__)
-
-
-def list_kinematics() -> list[str]:
-    return sorted(KinematicsFactory.available_kinematics())
+def interface_specs(cls: type) -> dict[str, Any]:
+    """The ROS type each topic travels as; the system's own topics always come as core_msgs."""
+    if not issubclass(cls, RosBridgeInterface):
+        return {"wire": "core_msgs on every contract topic"}
+    mapping = {**ROS_TOPIC_MAPPING, **cls.ros_types}
+    return {"distro": cls.ros_distro,
+            "ros_types": {topic.value: ch.ros_type for topic, ch in mapping.items()},
+            }
 
 
-def list_shapes() -> list[str]:
-    return sorted(GeometryFactory.available_shapes())
+# spec key -> (registry, parameter reader, spec reader)
+SECTIONS = {
+    "kinematics": (KinematicsFactory.available_kinematics, kinematics_params, specs),
+    "shape": (GeometryFactory.available_shapes, lambda cls: params(cls.construct_original_geometry), specs),
+    "controller": (ControllerFactory.available_controllers, init_params, specs),
+    "estimator": (EstimatorFactory.available_estimators, init_params, specs),
+    "battery": (BatteryFactory.available_batteries, init_params, specs),
+    "perception_sensors": (PerceptionSensorFactory.available_sensors, init_params, specs),
+    "state_sensors": (StateSensorFactory.available_sensors, init_params, specs),
+    "agent_type": (AgentInterfaceFactory.available_interfaces, init_params, interface_specs),  # params go under interface:
+}
 
 
-def list_controllers() -> list[str]:
-    return sorted(ControllerFactory.available_controllers())
-
-
-def list_agent_kinds() -> list[str]:
-    """Best-effort: AgentKind lives in core_msgs, not this package, and is
-    deliberately not hard-coded here. If it's importable and behaves like
-    a normal Enum, read its members straight off it; if that fails for
-    any reason, report none (validate_kind then skips the check) rather
-    than guess at what the valid values might be.
-    """
-    try:
-        from core_msgs.agents_contract import AgentKind
-        return [getattr(k, "value", str(k)) for k in AgentKind]
-    except Exception:
-        return []
-
-
-def capabilities_manifest() -> dict[str, Any]:
-    """Everything a GUI or validator needs, in one JSON-serializable dict."""
-    return {
-        "kinematics": describe_kinematics(),
-        "shapes": describe_shapes(),
-        "controllers": describe_controllers(),
-        "sensors" : describe_sensors(),
-        "agent_kinds": list_agent_kinds(),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-
-def _validate_named_config(
-    label: str, config: dict[str, Any] | None, described: dict[str, dict[str, Any]]
-) -> str | None:
-    config = config or {}
-    name = config.get("name")
-    if not name:
-        return None  # absent entirely -- caller already has its own default for this
-
-    entry = described.get(str(name).lower())
-    if entry is None:
-        return f"{label} '{name}' is not supported (known: {', '.join(sorted(described))})"
-
-    missing = [p for p in entry["required"] if config.get(p) is None]
-    if missing:
-        return f"{label} '{name}' is missing required parameter(s): {', '.join(missing)}"
-
-    if not entry["accepts_extra"]:
-        allowed = set(entry["params"]) | {"name"}
-        extra = sorted(set(config) - allowed)
-        if extra:
-            return (
-                f"{label} '{name}' has unrecognized parameter(s): {', '.join(extra)} "
-                f"(accepted: {', '.join(sorted(entry['params'])) or 'none'})"
-            )
-    return None
-
-
-def validate_kinematics_config(config: dict[str, Any] | None) -> str | None:
-    return _validate_named_config("kinematics", config, describe_kinematics())
-
-
-def validate_shape_config(config: dict[str, Any] | None) -> str | None:
-    return _validate_named_config("shape", config, describe_shapes())
-
-
-def validate_controller_config(config: dict[str, Any] | None) -> str | None:
-    return _validate_named_config("controller", config, describe_controllers())
-
-
-def validate_kind(value: Any) -> str | None:
-    known = list_agent_kinds()
-    if not known:
-        return None  # AgentKind unavailable/not introspectable -- don't block on it
-    val = getattr(value, "value", value)
-    if val not in known and value not in known:
-        return f"agent kind '{value}' is not supported (known: {', '.join(known)})"
-    return None
-
-
-def validate_discovery(
-    *,
-    kinematics_config: dict[str, Any] | None,
-    shape_config: dict[str, Any] | None,
-    controller_config: dict[str, Any] | None,
-    kind_value: Any,
-) -> list[str]:
-    """Collect every problem with a resolved agent config in one pass,
-    instead of stopping at the first (or, worse, silently downgrading
-    each field to a default one at a time -- see AgentProfile.build)."""
-    checks = (
-        validate_kinematics_config(kinematics_config),
-        validate_shape_config(shape_config),
-        validate_controller_config(controller_config),
-        validate_kind(kind_value),
-    )
-    return [problem for problem in checks if problem]
+def capabilities() -> dict[str, dict[str, dict[str, Any]]]:
+    """{spec key: {entry: {"about", "specs", "params"}}}, JSON friendly for a GUI."""
+    out = {key: {name: {"about": (cls.__doc__ or "").strip().split("\n")[0],
+                        "specs": spec_reader(cls),
+                        "params": list(param_reader(cls).values())}
+                 for name, cls in sorted(registry().items())}
+           for key, (registry, param_reader, spec_reader) in SECTIONS.items()}
+    out["kind"] = {kind.value: {"about": "", "specs": {}, "params": []} for kind in AgentKind}
+    return out
 
 
 if __name__ == "__main__":
-    print(capabilities_manifest())
+    for key, entries in capabilities().items():
+        print(f"{key}:")
+        for name, entry in entries.items():
+            print(f"  {name.upper()} : " + (f"  - {entry['about']}" if entry["about"] else ""))
+            inline = {k: v for k, v in entry["specs"].items() if not isinstance(v, dict)}
+            if inline:
+                print("      specs  :   " + "  ".join(f"{k}={v}" for k, v in inline.items()))
+            for k, nested in entry["specs"].items():
+                if isinstance(nested, dict):
+                    print(f"      {k}")
+                    for topic, ros_type in nested.items():
+                        print(f"        {topic:<18} {ros_type}")
+            if entry["params"]:
+                print("      params :  " + "  ".join(entry["params"]))
+        print()
