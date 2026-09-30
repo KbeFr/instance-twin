@@ -1,6 +1,6 @@
 """
 ROS message <-> core_msgs converters, registered per ROS type.
-A new robot on known ROS types needs no new converter, only an interface declaring its channels.
+A new robot on known ROS types needs no new converter, only sensors on topics the mapping covers.
 """
 from __future__ import annotations
 
@@ -11,8 +11,9 @@ from typing import Any, Callable, ClassVar
 
 from core_msgs.instance_agent.controll_payloads import MotionCommand
 from core_msgs.instance_agent.sensor_payloads import (
-    BatteryMessage, DetectedObjectSim2D, DetectionMessage, PoseMessage,
+    ArucoDetection, BatteryMessage, DetectedObjectSim2D, DetectionMessage, ImuMessage, Pose, PoseMessage,
 )
+from core_msgs.utils.math import Quaternion, Vector3, quaternion_to_yaw
 
 TypeLookup = Callable[[str], type]
 
@@ -62,10 +63,6 @@ class RosEncoder(ABC):
 
 # --- helpers ---
 
-def yaw_from_quaternion(q: Any) -> float:
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-
-
 def _vec3(types: TypeLookup, v: list[float]) -> Any:
     x, y, z = (list(v) + [0.0, 0.0, 0.0])[:3]
     return types("geometry_msgs/msg/Vector3")(x=float(x), y=float(y), z=float(z))
@@ -88,7 +85,8 @@ class OdometryDecoder(RosDecoder):
     def decode(self, ros_msg: Any) -> PoseMessage:
         p = ros_msg.pose.pose
         c, s = math.cos(self.otheta), math.sin(self.otheta)
-        yaw = yaw_from_quaternion(p.orientation) + self.otheta
+        quat = p.orientation
+        yaw = quaternion_to_yaw(quat.x, quat.y, quat.z, quat.w) + self.otheta
         return PoseMessage(
             x=self.ox + c * p.position.x - s * p.position.y,
             y=self.oy + s * p.position.x + c * p.position.y,
@@ -97,6 +95,39 @@ class OdometryDecoder(RosDecoder):
             angular_velocity=ros_msg.twist.twist.angular.z,
             frame_id="world",
         )
+
+
+@register_ros_decoder("sensor_msgs/msg/Imu")
+class ImuDecoder(RosDecoder):
+    """Orientation is dropped when the driver flags it unknown (covariance[0] == -1)."""
+
+    def decode(self, ros_msg: Any) -> ImuMessage:
+        a, w, q = ros_msg.linear_acceleration, ros_msg.angular_velocity, ros_msg.orientation
+        has_orientation = ros_msg.orientation_covariance[0] != -1.0
+        return ImuMessage(
+            linear_acceleration=[a.x, a.y, a.z],
+            angular_velocity=[w.x, w.y, w.z],
+            orientation_yaw=quaternion_to_yaw(q.x, q.y, q.z, q.w) if has_orientation else None,
+            orientation_quaternion=[q.x, q.y, q.z, q.w] if has_orientation else None,
+        )
+
+
+@register_ros_decoder("ros2_aruco_interfaces/msg/ArucoMarkers")
+class ArucoMarkersDecoder(RosDecoder):
+    """Marker poses in the camera's optical frame, as ros2_aruco publishes them."""
+
+    def __init__(self, sensor_type: str = "aruco", **params: Any):
+        super().__init__(**params)
+        self.sensor_type = sensor_type
+
+    def decode(self, ros_msg: Any) -> ArucoDetection:
+        poses = [
+            Pose(position=Vector3(x=p.position.x, y=p.position.y, z=p.position.z),
+                 orientation=Quaternion(x=p.orientation.x, y=p.orientation.y,
+                                        z=p.orientation.z, w=p.orientation.w))
+            for p in ros_msg.poses
+        ]
+        return ArucoDetection(marker_ids=[int(i) for i in ros_msg.marker_ids], poses=poses)
 
 
 @register_ros_decoder("sensor_msgs/msg/BatteryState")

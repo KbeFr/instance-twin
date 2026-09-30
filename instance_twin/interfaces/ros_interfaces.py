@@ -1,88 +1,104 @@
 """
-Robots behind the flexia ROS2 bridge. Each robot type only declares its channels;
-the codec and the per-ROS-type converters do the translation.
+Robots behind the flexia ROS2 bridge. The agent's sensors decide the channels; a channel travels
+as CDR when the topic has a ROS translation, as core_msgs when the system publishes it.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from typing import Any, ClassVar
+
+import jsonpickle
 
 from core_msgs.topic_contract import Direction, MessageType
 
 from instance_twin.interfaces.interface_handler import AgentInterface, Channel, register_agent_interface
-from instance_twin.interfaces.ros_codec import RosCodec, RosSerializedMessage
-from instance_twin.interfaces.ros_converters import RosConverterFactory
+from instance_twin.interfaces.ros.ros_codec import RosBridgeEnvelope, RosCodec
+from instance_twin.interfaces.ros.ros_converters import RosConverterFactory, RosDecoder, RosEncoder
+from instance_twin.interfaces.ros.ros_topic_mapping import EXTRA_MSGS, ROS_TOPIC_MAPPING, RosChannel
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class RosChannel:
-    ros_type: str
-    params: dict = field(default_factory=dict)
-
-
+@register_agent_interface("ros2")
 class RosBridgeInterface(AgentInterface):
-    """Contract channels carrying CDR in _payload; the bridge routes them to its ROS topics."""
+    """Any ROS2 robot on the stock mapping; robot types subclass it to override what differs."""
 
     ros_distro: ClassVar[str] = "humble"
-    inbound: ClassVar[dict[MessageType, RosChannel]] = {}
-    outbound: ClassVar[dict[MessageType, RosChannel]] = {}
+    ros_types: ClassVar[dict[MessageType, RosChannel]] = {}
 
     def __init__(self,
                  agent_name: str,
+                 topic_channels: list[Channel],
                  ros_distro: str | None = None,
+                 ros_types: dict[str, str] | None = None,
                  params: dict[str, dict] | None = None,
                  extra_msgs: dict[str, str] | None = None,
                  **kwargs: Any
     ):
-        super().__init__(agent_name)
+        super().__init__(agent_name, topic_channels)
 
-        self._codec = RosCodec(ros_distro or self.ros_distro, extra_msgs)
+        self._codec = RosCodec(ros_distro or self.ros_distro, {**EXTRA_MSGS, **(extra_msgs or {})})
 
-        # Per-deployment overrides keyed by message type, e.g. {"pose": {"origin": [1, 2, 0]}}
+        # Stock table < robot class < deployment config, e.g. ros_types: {action: geometry_msgs/msg/TwistStamped}
+        mapping = {**ROS_TOPIC_MAPPING, **self.ros_types,
+                   **{MessageType(k): RosChannel(v) for k, v in (ros_types or {}).items()}}
+
+        # Per-deployment converter params keyed by topic, e.g. {"lidar": {"max_range": 2.0}}
         overrides = params or {}
-        self._decoders = {
-            msg_type: RosConverterFactory.create_decoder(
-                channel.ros_type,
-                **{**channel.params, **overrides.get(msg_type.value, {})})
-            for msg_type, channel in self.inbound.items()
-        }
-        self._encoders = {
-            msg_type: RosConverterFactory.create_encoder(
-                channel.ros_type,
-                **{**channel.params, **overrides.get(msg_type.value, {})})
-            for msg_type, channel in self.outbound.items()
-        }
+        self._ros: dict[MessageType, RosChannel] = {}
+        self._decoders: dict[MessageType, RosDecoder] = {}
+        self._encoders: dict[MessageType, RosEncoder] = {}
 
-    def channels(self) -> list[Channel]:
-        channels = [Channel(msg_type, Direction.IN) for msg_type in self.inbound]
-        channels.extend(Channel(msg_type, Direction.OUT) for msg_type in self.outbound)
-        return channels
+        for channel in self.topic_channels:
+            ros = mapping.get(channel.msg_type)
+            if ros is None or not self._codec.knows(ros.ros_type):
+                continue
+            converter_params = {**ros.params, **overrides.get(channel.msg_type.value, {})}
+            try:
+                if channel.direction in (Direction.IN, Direction.INOUT):
+                    self._decoders[channel.msg_type] = RosConverterFactory.create_decoder(ros.ros_type, **converter_params)
+                if channel.direction in (Direction.OUT, Direction.INOUT):
+                    self._encoders[channel.msg_type] = RosConverterFactory.create_encoder(ros.ros_type, **converter_params)
+            except ValueError:
+                continue    # no converter for this ROS type: reported through unsupported()
+            self._ros[channel.msg_type] = ros
+
+    @property
+    def ros_topics(self) -> dict[str, str]:
+        """Contract topic -> ROS type for every channel built, e.g. to configure the bridge from."""
+        return {msg_type.value: ros.ros_type for msg_type, ros in self._ros.items()}
+
+    def supports(self, channel: Channel) -> bool:
+        """A built translation, or an inbound topic the system publishes in core_msgs."""
+        if channel.direction in (Direction.IN, Direction.INOUT) and channel.msg_type in self._decoders:
+            return True
+        if channel.direction in (Direction.OUT, Direction.INOUT) and channel.msg_type in self._encoders:
+            return True
+        return False
 
     def decode(self, msg_type: MessageType, payload: Any) -> Any | None:
-        channel = self.inbound.get(msg_type)
-        if channel is None:
+        decoder = self._decoders.get(msg_type)
+        if decoder is None:
+            logger.warning("decoder none for message_type %s", msg_type.value )
             return None
-        return self._decoders[msg_type].decode(self._codec.decode(payload, channel.ros_type))
+        return decoder.decode(self._codec.decode(payload, self._ros[msg_type].ros_type))
 
-    def encode(self, msg_type: MessageType, payload: Any) -> RosSerializedMessage | None:
+    def encode(self, msg_type: MessageType, payload: Any) -> RosBridgeEnvelope | None:
         """Only what the channel's encoder accepts; a link message has no ROS form and is dropped."""
-        channel = self.outbound.get(msg_type)
         encoder = self._encoders.get(msg_type)
-        if channel is None or not isinstance(payload, encoder.accepts):
+        if encoder is None or not isinstance(payload, encoder.accepts):
             return None
-        return self._codec.encode(encoder.encode(payload, self._codec.type), channel.ros_type)
+        return self._codec.encode(encoder.encode(payload, self._codec.type), self._ros[msg_type].ros_type)
 
 
 @register_agent_interface("turtlebot4")
 class Turtlebot4Interface(RosBridgeInterface):
     """TurtleBot4 on Humble, streams without a link handshake, so its first pose is the link ack."""
     inbound = {
-        MessageType.POSE: RosChannel("nav_msgs/msg/Odometry"),
-        #MessageType.DETECTIONS: RosChannel("sensor_msgs/msg/LaserScan", {"sensor_type": "lidar"}),
+        MessageType.ODOM: RosChannel("nav_msgs/msg/Odometry"),
         MessageType.BATTERY: RosChannel("sensor_msgs/msg/BatteryState"),
+        MessageType.IMU: RosChannel("sensor_msgs/msg/Imu"),
+
     }
     outbound = {MessageType.ACTION: RosChannel("geometry_msgs/msg/Twist")}
 
@@ -91,4 +107,5 @@ class Turtlebot4Interface(RosBridgeInterface):
 class Turtlebot4JazzyInterface(Turtlebot4Interface):
     """Jazzy switched cmd_vel to TwistStamped."""
     ros_distro = "jazzy"
+
     outbound = {MessageType.ACTION: RosChannel("geometry_msgs/msg/TwistStamped")}

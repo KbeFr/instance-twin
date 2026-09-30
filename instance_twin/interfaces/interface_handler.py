@@ -4,11 +4,14 @@ translated to and from the core_msgs the twin works with.
 """
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, List
 
 from core_msgs.topic_contract import Direction, MessageType
+
+logger = logging.getLogger(__name__)
 
 _interface_registry: dict[str, type["AgentInterface"]] = {}
 
@@ -40,16 +43,30 @@ class Channel:
     def to_dict(self) -> dict[str, str]:
         return {self.msg_type.value: self.direction.value}
 
+    @classmethod
+    def from_dict(cls, topic_dict: dict[str, str] | None) -> List[Channel]:
+        """Unknown entries are skipped, the same way register_node_topics treats them."""
+        channels: List[Channel] = []
+        for _type, _dir in (topic_dict or {}).items():
+            try:
+                channels.append(Channel(msg_type=MessageType(_type), direction=Direction(_dir)))
+            except ValueError:
+                logger.warning("skipping unrecognized topic entry: %s=%s", _type, _dir)
+        return channels
+
 
 class AgentInterface(ABC):
     """Wire <-> core_msgs for one agent type. Never sees the twin, only canonical messages."""
 
-    def __init__(self, agent_name: str, **params: Any):
+    def __init__(self, agent_name: str, topic_channels: List[Channel], **params: Any):
         self.agent_name = agent_name
 
+        # Everything the agent's sensors and topics ask for, duplicates folded
+        self.topic_channels: List[Channel] = list(dict.fromkeys(topic_channels))
+
     @abstractmethod
-    def channels(self) -> list[Channel]:
-        """Channels to wire, seen from the instance side."""
+    def supports(self, channel: Channel) -> bool:
+        """Whether this wire format can carry the channel, e.g. a ROS translation exists."""
 
     @abstractmethod
     def decode(self, msg_type: MessageType, payload: Any) -> Any | None:
@@ -58,6 +75,14 @@ class AgentInterface(ABC):
     @abstractmethod
     def encode(self, msg_type: MessageType, payload: Any) -> Any | None:
         """Canonical message (MotionCommand, InitialCommandMessage, ...) -> wire payload, None to drop."""
+
+    def channels(self) -> List[Channel]:
+        """Requested channels this interface can carry, seen from the instance side."""
+        return [ch for ch in self.topic_channels if self.supports(ch)]
+
+    def unsupported(self) -> List[Channel]:
+        """Requested channels this interface has no translation for."""
+        return [ch for ch in self.topic_channels if not self.supports(ch)]
 
     def topic_dict(self) -> dict[str, str]:
         """Channels as the {name: dir} dict register_node_topics takes."""

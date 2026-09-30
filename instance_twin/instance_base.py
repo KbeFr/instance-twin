@@ -21,7 +21,6 @@ from core_msgs.instance_aggregate.handshake import (
 )
 from core_msgs.instance_aggregate.mission import Mission, MissionType, MissionStatus
 from core_msgs.instance_aggregate.mission_handshake import MissionBidding, MissionPlanHint, MissionResponder
-from core_msgs.instance_agent.sensor_payloads import BatteryMessage, PoseMessage, DetectionMessage
 from core_msgs.instance_agent.controll_payloads import InitialCommandMessage
 from instance_twin.instance_comms import INSTANCE_DISCOVERY
 
@@ -36,7 +35,6 @@ class InstanceTwin(MessageDispatcher):
         loop_freq: float = 10.0,
         drive_agent: bool = False,
         goal_threshold: float = 0.25,
-        pose_alpha: float = 0.35,
         obstacle_ttl: float = 5.0,
     ) -> None:
 
@@ -53,7 +51,6 @@ class InstanceTwin(MessageDispatcher):
         self.dt = 1.0 / loop_freq
 
         self.goal_threshold = goal_threshold
-        self.pose_alpha = pose_alpha
         self.obstacle_ttl = obstacle_ttl
 
         # --- binding state ----
@@ -69,8 +66,7 @@ class InstanceTwin(MessageDispatcher):
 
         self.known_obstacles: dict[str, Any] = {}
 
-        self.inbox: queue.Queue = queue.Queue()
-        self._seeded = False           # has a real pose landed yet
+        self.inbox: queue.Queue = queue.Queue()   # (topic, msg, monotonic arrival time)
         self._link_countdown = 0
         self._complete_countdown = 0   # retransmit COMPLETE until COMPLETE_ACK
 
@@ -115,7 +111,8 @@ class InstanceTwin(MessageDispatcher):
         print(discovery)
         try:
             self.agent = AgentProfile(agent_name, discovery)
-        except DigitalTwinConfigError:
+        except (DigitalTwinConfigError, ValueError, TypeError):
+            # Unknown estimator / sensor / bad params included: revoke instead of half-binding
             self.agent = None
             self.logger.exception("refusing to bind %s", agent_name)
             return False
@@ -126,7 +123,6 @@ class InstanceTwin(MessageDispatcher):
         self.sim_time = 0.0
         self.active_mission = None
         self.arrive_flag = self.stop_flag = False
-        self._seeded = False
         self._link_countdown = 0
         self._complete_countdown = 0
         self.known_obstacles = {}
@@ -148,13 +144,15 @@ class InstanceTwin(MessageDispatcher):
         self.transport.pause_heartbeat()
 
         self.logger.info(
-            "bound %s: kinematics=%s shape=%s r=%.2f drive=%s sensors=%s",
+            "bound %s via %s: kinematics=%s shape=%s r=%.2f drive=%s estimator=%s channels=%s",
             agent_name,
+            type(self.agent.interface).__name__,
             self.agent.kinematics.__class__.__name__,
             self.agent.shape,
             self.agent.radius,
             self.drive_agent,
-            list(self.agent.perception_sensors) or "none",
+            self.agent.estimator.__class__.__name__,
+            self.agent.interface.topic_dict(),
         )
         return True
 
@@ -186,40 +184,7 @@ class InstanceTwin(MessageDispatcher):
 
         self.logger.info("released %s -- back to UNBOUND", released)
 
-    # ---- Callbacks ---- (queued)
-
-    @handles(MessageType.POSE)
-    def _handle_pose(self, msg: PoseMessage) -> None:
-        """
-        Get pose message from agent. This will be seen as accept on the initial command since
-        the agent should only start sending pose if initial command is received.
-        """
-
-        if not self.agent or not isinstance(msg, PoseMessage):
-            return
-
-        self.agent.linked = True
-
-        meas = np.array([[msg.x], [msg.y], [msg.theta]], dtype=float)
-
-        if not self._seeded:
-            self.agent.state[:3] = meas[: self.agent.state.shape[0]][:3]
-            self._seeded = True
-            self.logger.info("seeded from agent pose %s", meas.reshape(-1).round(2).tolist())
-            return
-
-        a = self.pose_alpha
-        self.agent.state[0, 0] += a * (meas[0, 0] - self.agent.state[0, 0])
-        self.agent.state[1, 0] += a * (meas[1, 0] - self.agent.state[1, 0])
-        if self.agent.state.shape[0] > 2:
-            err = np.arctan2(
-                np.sin(meas[2, 0] - self.agent.state[2, 0]),
-                np.cos(meas[2, 0] - self.agent.state[2, 0]),
-            )
-            self.agent.state[2, 0] = float(np.arctan2(
-                np.sin(self.agent.state[2, 0] + a * err),
-                np.cos(self.agent.state[2, 0] + a * err)
-            ))
+    # ---- Callbacks ---- (queued; agent sensor traffic is routed by the agent itself, see _drain_inbox)
 
     @handles(MessageType.MISSION)
     def _handle_mission(self, env: HandshakeEnvelope) -> None:
@@ -258,34 +223,6 @@ class InstanceTwin(MessageDispatcher):
             self._complete_countdown = 0
             self.logger.info("mission %s CLEARED", result.subject)
 
-
-    @handles(MessageType.BATTERY)
-    def _handle_battery(self, msg: BatteryMessage) -> None:
-        """Measured charge overrides the modelled one, the model only fills the gaps in between."""
-        if self.agent is None or self.agent.battery is None or not isinstance(msg, BatteryMessage):
-            return
-        if msg.percentage is not None:
-            self.agent.battery.status = float(msg.percentage)
-
-    @handles(MessageType.DETECTIONS)
-    def _handle_detection(self, msg: DetectionMessage) -> None:
-        """Single inbound channel for every sensor's detections.
-        """
-        if self.agent is None or not isinstance(msg, DetectionMessage):
-            return
-
-        if not self._seeded:
-            return
-
-        sensor = self.agent.perception_sensors.get(msg.sensor_type)
-        if sensor is None:
-            self.logger.warning("no perception sensor for %r (agent announced %s)",
-                                msg.sensor_type, list(self.agent.perception_sensors))
-            return
-        for obs in sensor.get_obstacle_observations(msg.payload, self.agent.pose):
-            self.known_obstacles[obs.id] = obs
-            self.pending_obstacles.append(obs)
-
     # --- step ----
 
     def step(self) -> np.ndarray | None:
@@ -311,10 +248,8 @@ class InstanceTwin(MessageDispatcher):
         self._retry_completion()
 
         self.agent.goal = self._current_goal()
-        if self.stop_flag or self.agent.battery_depleted:
-            self.agent.velocity = np.zeros_like(self.agent.velocity)
-        else:
-            self.agent.step_physics(self.dt, list(self.known_obstacles.values()))
+        self.agent.step_physics(self.dt, list(self.known_obstacles.values()), now=time.monotonic(),
+                                halt=self.stop_flag or self.agent.battery_depleted)
 
         self.sim_time += self.dt
 
@@ -340,19 +275,29 @@ class InstanceTwin(MessageDispatcher):
             del self.known_obstacles[oid]
 
     def _drain_inbox(self, budget: int = 512) -> None:
+        """Twin topics go to their handler; everything else is agent traffic, routed by the agent."""
         for _ in range(budget):
             try:
-                topic, msg = self.inbox.get_nowait()
+                topic, msg, received = self.inbox.get_nowait()
             except queue.Empty:
                 return
+
             handler_name = self._DISPATCH.get(topic)
-            if handler_name is None:
-                self.logger.warning("no handler registered for topic %s", topic)
-                continue
             try:
-                getattr(self, handler_name)(msg)
+                if handler_name is not None:
+                    getattr(self, handler_name)(msg)
+                elif self.agent is not None:
+                    self._ingest_agent(topic, msg, received)
             except Exception:
-                self.logger.exception("handler for %s failed", topic)
+                self.logger.exception("handling %s failed", topic)
+
+    def _ingest_agent(self, topic: MessageType, msg: Any, received: float) -> None:
+        """Sensors turn the message into estimate updates and obstacles; the first one confirms the link."""
+        if not self.agent.linked:
+            self.logger.info("link confirmed by first %s from %s", topic.value, self.agent.name)
+        for obs in self.agent.ingest(topic, msg, received):
+            self.known_obstacles[obs.id] = obs
+            self.pending_obstacles.append(obs)
 
     # --- Agent link ----
 

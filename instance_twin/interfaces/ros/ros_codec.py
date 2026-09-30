@@ -29,6 +29,14 @@ class RosSerializedMessage:
     encoding: str = CDR_ENCODING
 
 
+@dataclass
+class RosBridgeEnvelope:
+    """Outbound shape the bridge accepts: CDR under `_payload`, as it wraps its own messages.
+    Works whether flexNode sends the object bare or nested under `payload`."""
+    _payload: RosSerializedMessage
+    _ros_type: str = ""
+
+
 class RosCodec:
     """Typed CDR (de)serialization from .msg definitions, no handwritten message classes."""
 
@@ -42,6 +50,10 @@ class RosCodec:
         """Message class for a ros type, e.g. geometry_msgs/msg/Twist."""
         return self._store.types[ros_type]
 
+    def knows(self, ros_type: str) -> bool:
+        """Whether the typestore has a definition, stock or registered through extra_msgs."""
+        return ros_type in self._store.types
+
     def decode(self, payload: Any, ros_type: str) -> Any:
         """Full envelope, bare _payload, str or dict -> ROS message."""
         body = self._payload_of(payload)
@@ -50,9 +62,9 @@ class RosCodec:
         raw = base64.b64decode(body.get("data", ""))
         return self._store.deserialize_cdr(raw, ros_type)
 
-    def encode(self, ros_msg: Any, ros_type: str) -> RosSerializedMessage:
+    def encode(self, ros_msg: Any, ros_type: str) -> RosBridgeEnvelope:
         raw = bytes(self._store.serialize_cdr(ros_msg, ros_type))
-        return RosSerializedMessage(data=base64.b64encode(raw).decode("ascii"))
+        return RosBridgeEnvelope(RosSerializedMessage(data=base64.b64encode(raw).decode("ascii")), ros_type)
 
     @staticmethod
     def _payload_of(payload: Any) -> dict:
@@ -63,6 +75,8 @@ class RosCodec:
                 payload = json.loads(payload)
             except ValueError as ex:
                 raise RosCodecError(f"not json: {ex}") from ex
+        if isinstance(payload, RosBridgeEnvelope):
+            payload = payload._payload
         if isinstance(payload, RosSerializedMessage):
             return {"encoding": payload.encoding, "data": payload.data}
         if not isinstance(payload, dict):

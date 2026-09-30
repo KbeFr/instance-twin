@@ -2,26 +2,33 @@
 The shadow model of one agent.
 """
 import logging
-from importlib.resources import files
+from collections import defaultdict
 from typing import Any
 
 import numpy as np
 
 from instance_twin.battery.battery_handler import BatteryFactory
+from instance_twin.interfaces import Channel
 from instance_twin.irsim_borrowed.controller.controller_handler import ControllerFactory
 from instance_twin.irsim_borrowed.geometry.geometryhandler import GeometryFactory
 from instance_twin.irsim_borrowed.kinematics.kinematics_handler import KinematicsFactory
 from instance_twin.interfaces.interface_handler import AgentInterface, AgentInterfaceFactory
-from instance_twin.sensors.base_sensors import PerceptionSensor
+from instance_twin.estimation.estimator_handler import EstimatorFactory, StateEstimator
+from instance_twin.sensors.base_sensors import PerceptionSensor, StateSensor
 from instance_twin.sensors.perception_sensors import PerceptionSensorFactory
+from instance_twin.sensors.state_sensors import StateSensorFactory
 from core_msgs.global_msgs.global_payloads import AgentDiscoveryMessage
 from core_msgs.instance_agent.controll_payloads import MotionCommand
+from core_msgs.instance_agent.sensor_payloads import DetectionMessage
 from core_msgs.instance_aggregate.mission_handshake import MissionBidding
-from core_msgs.utils.utils import load_config
+from core_msgs.instance_aggregate.payloads import ObstacleObservation
+from core_msgs.topic_contract import MessageType, Direction
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_AGENT_CONFIG_PATH =str( files("instance_twin").joinpath("config", "default_agent_config.yaml"))
+# The only default: there is a single estimator implementation
+DEFAULT_ESTIMATOR = {"name": "ekf"}
+
 
 class DigitalTwinConfigError(ValueError):
     """Raised when a digital twin cannot be faithfully constructed."""
@@ -29,64 +36,86 @@ class DigitalTwinConfigError(ValueError):
 
 class AgentProfile:
     def __init__(self, agent_name: str, disc: AgentDiscoveryMessage):
+        self.name = agent_name
 
-        #self.default_config :dict = load_config(DEFAULT_AGENT_CONFIG_PATH)
-
-        def _get(key: str) -> Any:
-            """
-            Safely fetches an attribute. Handles missing attributes and explicit Nones.
-            TODO: needs be stricter with real deployment
-            """
+        def get(key: str, default: Any = None) -> Any:
             val = getattr(disc, key, None)
-            if val is None :
-                    #raise DigitalTwinConfigError(
-                    #    f"Cannot initialize agent '{agent_name}': The parameter '{key}' "
-                    #    f"is missing from both the discovery message and the fallback config."
-                    #)
-                logger.warning("AgentConfig parameter missing from discovery %s"
-                               "using default from config", key)
+            return default if val is None else val
+
+        def need(key: str) -> Any:
+            val = getattr(disc, key, None)
+            if not val and val != 0:
+                raise DigitalTwinConfigError(f"agent '{agent_name}': discovery is missing '{key}'")
             return val
 
         # Identity
-        self.name = agent_name
-        self.id = _get("agent_id")
-        self.kind = _get("kind")
-        self.agent_type = _get("agent_type")
+        self.id = need("agent_id")
+        self.kind = need("kind")
+        self.agent_type = need("agent_type")
 
-        # specs
-        self.radius = _get("radius")
-        self.mass = _get("mass")
-        self.friction = _get("friction")
-        self.avg_speed = _get("avg_speed")
-        self.max_speed = _get("max_speed")
+        # Specs
+        self.radius = need("radius")
+        self.max_speed = need("max_speed")
+        self.mass = get("mass")
+        self.friction = get("friction")
+        self.avg_speed = get("avg_speed")
+        self.shape_config = need("shape")
 
-        self.shape_config = _get("shape")
-        self.topic_dict = _get("topics")
+        # Only what no sensor or model covers, like {"action": "out"}
+        self.topic_dict = get("topics", {})
 
-        # Wire format, picked by agent type: simulated core_msgs, a ROS2 bridge robot, ...
+        # Models
+        kinematics_cfg = need("kinematics")
+        self.geometry = GeometryFactory.create_geometry(**self.shape_config)
+        self.kinematics = KinematicsFactory.create_kinematics(**kinematics_cfg)
+
+        # Estimator predicts with a noise-free copy: its own covariance is the noise model
+        self.estimator: StateEstimator = EstimatorFactory.create_estimator(
+            kinematics=KinematicsFactory.create_kinematics(**{**kinematics_cfg, "noise": False}),
+            **get("estimator", DEFAULT_ESTIMATOR),
+        )
+
+        battery_cfg = get("battery")
+        self.battery = BatteryFactory.create_battery(**battery_cfg) if battery_cfg else None
+        if self.battery and None in (self.mass, self.friction, self.avg_speed):
+            raise DigitalTwinConfigError(f"agent '{agent_name}': battery needs mass, friction and avg_speed")
+
+        controller_cfg = get("controller")
+        self.controller = ControllerFactory.create_controller(**controller_cfg) if controller_cfg else None
+
+        # Sensors: at least one state sensor, or the estimator never anchors
+        self.state_sensors: dict[str, StateSensor] = {
+            s.name: s for s in (StateSensorFactory.create_sensor(**c) for c in need("state_sensors"))}
+        self.perception_sensors: dict[str, PerceptionSensor] = {
+            s.name: s for s in (PerceptionSensorFactory.create_handler(**c) for c in get("perception_sensors", []))}
+
+        # Topic -> sensors listening on it
+        self._state_routes: dict[MessageType, list[StateSensor]] = defaultdict(list)
+        for s in self.state_sensors.values():
+            self._state_routes[s.topic].append(s)
+        self._perception_routes: dict[MessageType, list[PerceptionSensor]] = defaultdict(list)
+        for s in self.perception_sensors.values():
+            self._perception_routes[s.topic].append(s)
+
+        # Interface: everything announced must be carried, or the twin would silently miss it
+        topics = [*self._state_routes, *self._perception_routes]
+        if self.battery:
+            topics.append(self.battery.topic)
+        channels = [Channel(t, Direction.IN) for t in topics] + Channel.from_dict(self.topic_dict)
+
         try:
             self.interface: AgentInterface = AgentInterfaceFactory.create_interface(
-                self.agent_type, agent_name, topics=self.topic_dict, **(_get("interface") or {}))
+                self.agent_type, agent_name, topic_channels=channels, **get("interface", {}))
         except ValueError as ex:
             raise DigitalTwinConfigError(f"Cannot interface agent '{agent_name}': {ex}") from ex
 
-        # Sub-systems
-        self.geometry = GeometryFactory.create_geometry(**self.shape_config)
-        self.kinematics = KinematicsFactory.create_kinematics(**_get("kinematics"))
+        missing = list(self.interface.unsupported())
+        if missing:
+            raise DigitalTwinConfigError(
+                f"agent type '{self.agent_type}' has no translation for "
+                f"{[ch.to_dict() for ch in missing]} of agent '{agent_name}'")
 
-        battery_cfg = _get("battery")
-        self.battery = BatteryFactory.create_battery(**battery_cfg) if battery_cfg else None
-
-        controller_cfg = _get("controller")
-        self.controller = ControllerFactory.create_controller(**controller_cfg) if controller_cfg else None
-
-        #  Perception Sensors
-        self.perception_sensors: dict[str, PerceptionSensor] = {}
-        for sensor_config in _get("perception_sensors"):
-            sensor = PerceptionSensorFactory.create_handler(**sensor_config)
-            self.perception_sensors[sensor.name] = sensor
-
-        # Runtime State, sized by the kinematics: diff [x,y,th]/[v,w], acker adds steer, a uav more
+        # Runtime state, sized by the kinematics: diff [x,y,th]/[v,w], acker adds steer, a uav more
         self.state = np.zeros((self.kinematics.state_dim, 1))
         self.velocity = np.zeros((self.kinematics.action_dim, 1))
         self.goal: np.ndarray | None = None
@@ -94,21 +123,48 @@ class AgentProfile:
         self.battery_depleted: bool = False
         self.goal_threshold: float = 0.25
 
-    def step_physics(self, dt: float, pending_obstacles: list) -> None:
-        """Advances the agent's physical simulation by one time step."""
-        if self.goal is None or self.controller is None:
+    def ingest(self, topic: MessageType, msg: Any, received: float) -> list[ObstacleObservation]:
+        """Hands one agent message to everything listening on its topic; returns the obstacles it revealed.
+        Any message on the agent's channels proves the link."""
+        self.linked = True
+
+        for sensor in self._state_routes.get(topic, ()):
+            measurement = sensor.get_state_update(msg)
+            if measurement is None:
+                continue
+            self.estimator.predict_to(received, self.velocity)
+            if not self.estimator.update(measurement):
+                logger.debug("[%s] %s measurement rejected by the gate", self.name, sensor.name)
+        self.state = self.estimator.state
+
+        if self.battery and topic == self.battery.topic:
+            self.battery.measure(msg)
+
+        # Projecting from an unanchored pose would plant obstacles in the wrong place
+        perception = self._perception_routes.get(topic, ())
+        if not perception or not self.estimator.initialized:
+            return []
+        payload = msg.payload if isinstance(msg, DetectionMessage) else msg
+        observations: list[ObstacleObservation] = []
+        for sensor in perception:
+            observations.extend(sensor.get_obstacle_observations(payload, self.pose))
+        return observations
+
+    def step_physics(self, dt: float, pending_obstacles: list, now: float, halt: bool = False) -> None:
+        """Brings the estimate up to now under the last command, then picks the next command from it."""
+        self.estimator.predict_to(now, self.velocity)
+        self.state = self.estimator.state
+
+        # No command until the estimate is anchored: driving blind from (0, 0) is worse than waiting
+        if halt or self.goal is None or self.controller is None or not self.estimator.initialized:
             self.velocity = np.zeros_like(self.velocity)
         else:
             action = self.controller.get_action(self, pending_obstacles)
             self.velocity = np.asarray(action, dtype=float).reshape(self.velocity.shape)
 
-        if self.kinematics is not None:
-            self.state = self.kinematics.step(self.state, self.velocity, dt)
+        self.geometry.step(self.state)
 
-        if self.geometry is not None:
-            self.geometry.step(self.state)
-
-        if self.battery is not None:
+        if self.battery:
             v = float(self.velocity[0, 0])
             w = float(self.velocity[1, 0]) if self.velocity.shape[0] > 1 else 0.0
             self.battery.step(dt, v, w, self.mass, self.friction)
@@ -119,17 +175,24 @@ class AgentProfile:
         if not self.battery:
             return None
 
-        v = max(float(self.avg_speed), 1e-6)
-        duration = distance / v
-
+        duration = distance / max(float(self.avg_speed), 1e-6)
         joules = self.battery.predict_joules(distance, duration, self.mass, self.friction)
         drain = self.battery.to_percent(joules)
-        soc_after = self.battery.status - drain
 
         return MissionBidding(
             time_bidding=duration,
             battery_bidding=drain,
-            battery_margin=soc_after,
+            battery_margin=self.battery.status - drain,
+        )
+
+    def motion_command(self) -> MotionCommand:
+        """Current action in every form an interface may need: raw action plus body twist."""
+        linear, angular = self.kinematics.body_twist(self.state, self.velocity)
+        return MotionCommand(
+            kinematics=self.kinematics.name,
+            action=self.velocity.reshape(-1).tolist(),
+            linear=linear,
+            angular=angular,
         )
 
     @property
@@ -147,25 +210,15 @@ class AgentProfile:
 
     @property
     def velocity_xy(self) -> np.ndarray:
-        return self.kinematics.velocity_to_xy(self.state, self.velocity) if self.kinematics else np.zeros((2, 1))
-
-    def motion_command(self) -> MotionCommand:
-        """Current action in every form an interface may need: raw action plus body twist."""
-        linear, angular = self.kinematics.body_twist(self.state, self.velocity)
-        return MotionCommand(
-            kinematics=self.kinematics.name,
-            action=self.velocity.reshape(-1).tolist(),
-            linear=linear,
-            angular=angular,
-        )
+        return self.kinematics.velocity_to_xy(self.state, self.velocity)
 
     @property
     def vel_min(self) -> np.ndarray:
-        return np.c_[self.kinematics.vel_min] if self.kinematics else np.zeros((2, 1))
+        return np.c_[self.kinematics.vel_min]
 
     @property
     def vel_max(self) -> np.ndarray:
-        return np.c_[self.kinematics.vel_max] if self.kinematics else np.ones((2, 1))
+        return np.c_[self.kinematics.vel_max]
 
     @property
     def shape(self) -> str:

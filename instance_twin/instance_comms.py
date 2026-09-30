@@ -3,6 +3,7 @@ instance_comms.py
 """
 from __future__ import annotations
 
+import time
 from functools import partial
 
 import jsonpickle
@@ -13,7 +14,7 @@ from flexCommunicator.clientLibraries.flcpy.utils.constants import APPLICATION_S
 from core_msgs.global_msgs.global_payloads import (
     HeartBeatMessage, InstanceDiscoveryMessage, RegisteredMessage,
 )
-from core_msgs.topic_contract import MessageType, register_node_topics, get_data_name
+from core_msgs.topic_contract import Direction, MessageType, register_node_topics, get_data_name
 
 from instance_twin.interfaces.interface_handler import AgentInterface
 
@@ -116,7 +117,7 @@ class InstanceNetworkNode(flexNode):
     def _ingest(self, kind: str, payload: str) -> None:
         msg = self._decode(kind, payload)
         if msg is not None:
-            self.twin.inbox.put((kind, msg))
+            self.twin.inbox.put((kind, msg, time.monotonic()))
 
     def _ingest_instantiate(self, payload: str) -> None:
         """Handled inline, not queued: the step timer isn't running when unbound."""
@@ -183,19 +184,17 @@ class InstanceNetworkNode(flexNode):
             },
         )
 
-        # Only wire what the twin handles, the rest would just be decoded and dropped
+        # The interface only carries what the agent's sensors asked for, so every inbound channel is wired
+        inbound = [ch.msg_type for ch in interface.channels() if ch.direction in (Direction.IN, Direction.INOUT)]
         self._link_topics = register_node_topics(
             node=self, topic_dict=interface.topic_dict(),
             namespace=self.namespace, node_id=agent_name,
-            in_callbacks={msg_type: partial(self._ingest_agent, msg_type) for msg_type in self.twin._DISPATCH},
+            in_callbacks={msg_type: partial(self._ingest_agent, msg_type) for msg_type in inbound},
         )
         self.logger.debug("Subscribed to agent=%s via %s", agent_name, type(interface).__name__)
 
     def _ingest_agent(self, msg_type: MessageType, payload) -> None:
         """Agent wire format -> core_msgs through its interface, then queue."""
-        print(msg_type)
-        print(payload)
-
         interface = self._interface
         if interface is None:
             return
@@ -209,7 +208,8 @@ class InstanceNetworkNode(flexNode):
                 self.logger.warning("decode failed on %s: %s (suppressing repeats)", msg_type.value, ex)
             return
         if msg is not None:
-            self.twin.inbox.put((msg_type, msg))
+            # Stamped on arrival: agent clocks are not synced with ours, so their stamps can't time the filter
+            self.twin.inbox.put((msg_type, msg, time.monotonic()))
 
     def unsubscribe_agent(self) -> None:
         """
