@@ -87,9 +87,11 @@ class AgentProfile:
         # Sensors: at least one state sensor, or the estimator never anchors. A static agent
         # (e.g. a fixed camera) may instead be placed once through estimator.initial_pose.
         state_cfgs = get("state_sensors", [])
+
         if not state_cfgs and estimator_cfg.get("initial_pose") is None:
             raise DigitalTwinConfigError(
                 f"agent '{agent_name}': needs state_sensors, or estimator.initial_pose for a static agent")
+
         self.state_sensors: dict[str, StateSensor] = {
             s.name: s for s in (StateSensorFactory.create_sensor(**c) for c in state_cfgs)}
         self.perception_sensors: dict[str, PerceptionSensor] = {
@@ -114,9 +116,10 @@ class AgentProfile:
             topics.append(self.battery.topic)
         channels = [Channel(t, Direction.IN) for t in topics] + Channel.from_dict(self.topic_dict)
 
+        interface_kwargs = need("interface")
         try:
             self.interface: AgentInterface = AgentInterfaceFactory.create_interface(
-                self.agent_type, agent_name, topic_channels=channels, **get("interface", {}))
+                 topic_channels=channels, **interface_kwargs)
         except ValueError as ex:
             raise DigitalTwinConfigError(f"Cannot interface agent '{agent_name}': {ex}") from ex
 
