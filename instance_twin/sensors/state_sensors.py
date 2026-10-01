@@ -52,6 +52,15 @@ class PoseSensor(StateSensor):
             "wz": getattr(payload, "angular_velocity", None),
         }
 
+@register_state_sensor("external_pose")
+class ExternalPoseSensor(PoseSensor):
+    """This agent's pose measured by someone else (static camera, drone), relayed by the aggregate.
+    Arrives on the instance's own scope, so it never goes through the agent interface."""
+    components = frozenset({"x", "y", "theta"})
+    default_topic = MessageType.EXTERNAL_POSE
+    instance_scoped = True
+
+
 @register_state_sensor("gps")
 class GpsSensor(StateSensor):
     """Gps sensor attached to agent, higher noise than pose.

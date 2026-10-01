@@ -171,16 +171,20 @@ class InstanceNetworkNode(flexNode):
 
     # --- subscription lifecycle ---------------------------------------------
 
-    def subscribe_agent(self, agent_name: str, interface: AgentInterface) -> None:
-        """Wire up both channels: aggregate <-> instance and instance <-> agent."""
+    def subscribe_agent(self, agent_name: str, interface: AgentInterface,
+                        instance_topics: list[MessageType] | tuple = ()) -> None:
+        """Wire up both channels: aggregate <-> instance and instance <-> agent.
+        instance_topics: sensor topics the aggregate publishes on our own scope (e.g. external_pose)."""
         self._agent_name = agent_name
         self._interface = interface
 
+        agg_topics = {**self._aggregate_topic_dict, **{t.value: "in" for t in instance_topics}}
         self._agg_topics = register_node_topics(
-            node=self, topic_dict=self._aggregate_topic_dict,
+            node=self, topic_dict=agg_topics,
             namespace=self.namespace, node_id=self.node_name,
             in_callbacks={
-                MessageType.MISSION:  lambda p: self._ingest(MessageType.MISSION, p),
+                MessageType.MISSION: partial(self._ingest, MessageType.MISSION),
+                **{t: partial(self._ingest, t) for t in instance_topics},
             },
         )
 

@@ -27,6 +27,9 @@ class BaseSensor(ABC):
 
     default_topic: ClassVar[MessageType]
 
+    # True: published by the aggregate on {ns}/{instance}/..., core_msgs as-is (no agent interface)
+    instance_scoped: ClassVar[bool] = False
+
     def __init__(self, name: str,
                  topic: str | None = None,
                  offset: Dict[str, Any] | None = None
@@ -100,4 +103,7 @@ class StateSensor(BaseSensor):
         picked = {k: float(values[k]) for k in self.noise if values.get(k) is not None}
         if not picked:
             return None
-        return Measurement(values=picked, noise={k: self.noise[k] for k in picked}, source=self.name)
+        # The sender's sigma when it gives one; the configured noise is the floor we never trust past
+        reported = getattr(payload, "std", None) or {}
+        noise = {k: max(self.noise[k], float(reported.get(k) or 0.0)) for k in picked}
+        return Measurement(values=picked, noise=noise, source=self.name)

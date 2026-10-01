@@ -45,8 +45,17 @@ class ArucoDetectionSensor(PerceptionSensor):
                  offset: Dict[str, Any] | None = None,
                  radius: float = 0.8,
                  topic: str | None = None,
+                 std_floor: float = 0.02,
+                 k_xy: float = 0.0,
+                 std_theta_floor: float = 0.05,
+                 k_theta: float = 0.0,
                  **params: Any):
         self.radius = float(radius)
+        # Error model of one detection: sigma grows with the camera -> marker range d
+        self.std_floor = float(std_floor)              # [m] calibration bias / jitter at close range
+        self.k_xy = float(k_xy)                        # [1/m] depth error ~ d^2
+        self.std_theta_floor = float(std_theta_floor)  # [rad]
+        self.k_theta = float(k_theta)                  # [rad/m]
         super().__init__(name, topic ,offset)
 
     def get_obstacle_observations(self, payload: ArucoDetection, robot_pose) -> list[ObstacleObservation]:
@@ -61,14 +70,20 @@ class ArucoDetectionSensor(PerceptionSensor):
             marker = Frame(pose.position, pose.orientation)
             world = sensor.compose(marker)
 
+            p = pose.position
+            d = math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2)     # frame-convention independent
+
             out.append(ObstacleObservation(
                 # A marker id is globally unique and stable, so two cameras
                 # seeing marker 7 report one obstacle.
                 id=f"aruco:{marker_id}",
+                marker_id=int(marker_id),
                 x=world.x,
                 y=world.y,
                 theta=world.yaw,
                 radius=self.radius,
+                std_xy=math.hypot(self.std_floor, self.k_xy * d ** 2),
+                std_theta=math.hypot(self.std_theta_floor, self.k_theta * d),
             ))
 
         return out

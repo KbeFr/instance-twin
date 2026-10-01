@@ -70,9 +70,10 @@ class AgentProfile:
         self.kinematics = KinematicsFactory.create_kinematics(**kinematics_cfg)
 
         # Estimator predicts with a noise-free copy: its own covariance is the noise model
+        estimator_cfg = dict(get("estimator", DEFAULT_ESTIMATOR))
         self.estimator: StateEstimator = EstimatorFactory.create_estimator(
             kinematics=KinematicsFactory.create_kinematics(**{**kinematics_cfg, "noise": False}),
-            **get("estimator", DEFAULT_ESTIMATOR),
+            **estimator_cfg,
         )
 
         battery_cfg = get("battery")
@@ -83,9 +84,14 @@ class AgentProfile:
         controller_cfg = get("controller")
         self.controller = ControllerFactory.create_controller(**controller_cfg) if controller_cfg else None
 
-        # Sensors: at least one state sensor, or the estimator never anchors
+        # Sensors: at least one state sensor, or the estimator never anchors. A static agent
+        # (e.g. a fixed camera) may instead be placed once through estimator.initial_pose.
+        state_cfgs = get("state_sensors", [])
+        if not state_cfgs and estimator_cfg.get("initial_pose") is None:
+            raise DigitalTwinConfigError(
+                f"agent '{agent_name}': needs state_sensors, or estimator.initial_pose for a static agent")
         self.state_sensors: dict[str, StateSensor] = {
-            s.name: s for s in (StateSensorFactory.create_sensor(**c) for c in need("state_sensors"))}
+            s.name: s for s in (StateSensorFactory.create_sensor(**c) for c in state_cfgs)}
         self.perception_sensors: dict[str, PerceptionSensor] = {
             s.name: s for s in (PerceptionSensorFactory.create_handler(**c) for c in get("perception_sensors", []))}
 
@@ -97,8 +103,13 @@ class AgentProfile:
         for s in self.perception_sensors.values():
             self._perception_routes[s.topic].append(s)
 
+        # Instance-scoped topics come from the aggregate as core_msgs; only the rest is the agent's
+        sensors = [*self.state_sensors.values(), *self.perception_sensors.values()]
+        self.instance_topics: list[MessageType] = list(dict.fromkeys(
+            s.topic for s in sensors if s.instance_scoped))
+
         # Interface: everything announced must be carried, or the twin would silently miss it
-        topics = [*self._state_routes, *self._perception_routes]
+        topics = [t for t in (*self._state_routes, *self._perception_routes) if t not in self.instance_topics]
         if self.battery:
             topics.append(self.battery.topic)
         channels = [Channel(t, Direction.IN) for t in topics] + Channel.from_dict(self.topic_dict)
@@ -125,8 +136,9 @@ class AgentProfile:
 
     def ingest(self, topic: MessageType, msg: Any, received: float) -> list[ObstacleObservation]:
         """Hands one agent message to everything listening on its topic; returns the obstacles it revealed.
-        Any message on the agent's channels proves the link."""
-        self.linked = True
+        Any message on the agent's own channels proves the link; a relayed fix does not."""
+        if topic not in self.instance_topics:
+            self.linked = True
 
         for sensor in self._state_routes.get(topic, ()):
             measurement = sensor.get_state_update(msg)

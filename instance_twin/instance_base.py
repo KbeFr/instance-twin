@@ -132,7 +132,7 @@ class InstanceTwin(MessageDispatcher):
         # hold offers on several missions at once.
         self.mission_responder = HandshakeResponder(self.name, bid_fn=self._estimate_mission_bid)
 
-        self.transport.subscribe_agent(self.agent.name, self.agent.interface)
+        self.transport.subscribe_agent(self.agent.name, self.agent.interface, self.agent.instance_topics)
 
         # Notify the agent immediately
         self._send_link()
