@@ -130,7 +130,7 @@ class InstanceTwin(MessageDispatcher):
 
         # Set mission responder before subscribing to missions. This one bids, and may
         # hold offers on several missions at once.
-        self.mission_responder = HandshakeResponder(self.name, bid_fn=self._estimate_mission_bid)
+        self.mission_responder = MissionResponder(self.name, bid_fn=self._estimate_mission_bid)
 
         self.transport.subscribe_agent(self.agent.name, self.agent.interface, self.agent.instance_topics)
 

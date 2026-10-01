@@ -27,7 +27,7 @@ class RosBridgeInterface(AgentInterface):
     ros_types: ClassVar[dict[MessageType, RosChannel]] = {}
 
     def __init__(self,
-                 agent_name: str,
+                 name : str,
                  topic_channels: list[Channel],
                  ros_distro: str | None = None,
                  ros_types: dict[str, str] | None = None,
@@ -35,15 +35,16 @@ class RosBridgeInterface(AgentInterface):
                  extra_msgs: dict[str, str] | None = None,
                  **kwargs: Any
     ):
-        super().__init__(agent_name, topic_channels)
+        super().__init__(name, topic_channels)
 
         self._codec = RosCodec(ros_distro or self.ros_distro, {**EXTRA_MSGS, **(extra_msgs or {})})
 
-        # Stock table < robot class < deployment config, e.g. ros_types: {action: geometry_msgs/msg/TwistStamped}
-        mapping = {**ROS_TOPIC_MAPPING, **self.ros_types,
+        # Stock table < robot class < deployment config, like ros_types: {action: geometry_msgs/msg/TwistStamped}
+        mapping = {**ROS_TOPIC_MAPPING,
                    **{MessageType(k): RosChannel(v) for k, v in (ros_types or {}).items()}}
+        ## could integrate ros_channel and channel I think for prettier code
 
-        # Per-deployment converter params keyed by topic, e.g. {"lidar": {"max_range": 2.0}}
+        # Per-deployment converter params keyed by topic like {"lidar": {"max_range": 2.0}}
         overrides = params or {}
         self._ros: dict[MessageType, RosChannel] = {}
         self._decoders: dict[MessageType, RosDecoder] = {}

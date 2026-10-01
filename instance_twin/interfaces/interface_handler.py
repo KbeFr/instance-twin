@@ -58,9 +58,8 @@ class Channel:
 class AgentInterface(ABC):
     """Wire <-> core_msgs for one agent type. Never sees the twin, only canonical messages."""
 
-    def __init__(self, agent_name: str, topic_channels: List[Channel], **params: Any):
-        self.agent_name = agent_name
-
+    def __init__(self, name: str, topic_channels: List[Channel], **params: Any):
+        self.name = name
         # Everything the agent's sensors and topics ask for, duplicates folded
         self.topic_channels: List[Channel] = list(dict.fromkeys(topic_channels))
 
@@ -95,11 +94,11 @@ class AgentInterface(ABC):
 class AgentInterfaceFactory:
 
     @staticmethod
-    def create_interface(agent_type: str, agent_name: str, **kwargs) -> AgentInterface:
-        cls = _interface_registry.get(agent_type.lower()) if agent_type else None
+    def create_interface(interface_name: str, **kwargs) -> AgentInterface:
+        cls = _interface_registry.get(interface_name.lower()) if interface_name else None
         if cls is None:
-            raise ValueError(f"Unknown agent type: {agent_type}")
-        return cls(agent_name, **kwargs)
+            raise ValueError(f"Unknown agent type: {interface_name}")
+        return cls(interface_name, **kwargs)
 
     @staticmethod
     def get_handler_class(agent_type: str) -> type[AgentInterface] | None:

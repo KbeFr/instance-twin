@@ -61,7 +61,7 @@ The twin bids time and battery cost (from its battery model) on missions and fol
 Binding is refused unless the resolved spec provides all of:
 - `agent_id`
 - `kind`
-- `agent_type`
+- `interface_name`
 - `radius`
 - `max_speed`
 - `shape`
