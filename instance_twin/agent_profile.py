@@ -117,9 +117,10 @@ class AgentProfile:
         channels = [Channel(t, Direction.IN) for t in topics] + Channel.from_dict(self.topic_dict)
 
         interface_kwargs = need("interface")
+        interface_name = interface_kwargs.get("name", None)
         try:
             self.interface: AgentInterface = AgentInterfaceFactory.create_interface(
-                 topic_channels=channels, **interface_kwargs)
+                 name=interface_name, topic_channels=channels, **interface_kwargs)
         except ValueError as ex:
             raise DigitalTwinConfigError(f"Cannot interface agent '{agent_name}': {ex}") from ex
 

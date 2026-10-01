@@ -94,11 +94,11 @@ class AgentInterface(ABC):
 class AgentInterfaceFactory:
 
     @staticmethod
-    def create_interface(interface_name: str, **kwargs) -> AgentInterface:
-        cls = _interface_registry.get(interface_name.lower()) if interface_name else None
+    def create_interface(name: str, **kwargs) -> AgentInterface:
+        cls = _interface_registry.get(name.lower()) if name else None
         if cls is None:
-            raise ValueError(f"Unknown agent type: {interface_name}")
-        return cls(interface_name, **kwargs)
+            raise ValueError(f"Unknown agent type: {name}")
+        return cls(name, **kwargs)
 
     @staticmethod
     def get_handler_class(agent_type: str) -> type[AgentInterface] | None:
