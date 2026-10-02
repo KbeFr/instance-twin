@@ -11,9 +11,9 @@ services:
       MQTT_BROKER_HOST: mqtt-broker
       REDIS_HOST: redis
       TWIN_NAMESPACE: twin-project
-      TWIN_GUI_PORT: "8081"
+      TWIN_GUI_PORT: "8084"
     ports:
-      - "8081:8081"
+      - "8084:8084"
     networks:
       - twin_net
 

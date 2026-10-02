@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libgeos-dev \
     git \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
@@ -28,7 +29,7 @@ WORKDIR /app/instance-twin
 ENV PYTHONUNBUFFERED=1 \
     TWIN_TICK_HZ=10 \
     TWIN_NAMESPACE=default_ns \
-    TWIN_NAME=InstanceTwin \
+    TWIN_NAME=InstanceTwin3 \
     MQTT_BROKER_HOST=mosquitto \
     REDIS_HOST=redis \
     TWIN_DRIVE_AGENT=true

@@ -98,6 +98,7 @@ class InstanceTwin(MessageDispatcher):
             self.transport.publish_to_aggregate(message_type ,result.reply)
 
         if result.action is HandshakeAction.RELEASE_SUBJECT:
+            print("UNBIND")
             self._unbind()
 
 

@@ -228,6 +228,7 @@ class InstanceNetworkNode(flexNode):
     # --- stepping -----------------------------------------------------------
 
     def start_stepping(self) -> None:
+        print("START STEPPING")
         if hasattr(self.step_timer, "start"):
             self.step_timer.start()
             self.logger.info("twin stepping started (loop timer .start() called)")
@@ -239,6 +240,7 @@ class InstanceNetworkNode(flexNode):
             )
 
     def stop_stepping(self) -> None:
+        print("STOP STEPPING")
         self.step_timer.stop()
 
 
